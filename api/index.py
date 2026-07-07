@@ -1,53 +1,60 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from uuid import uuid4
 import time
+import base64
 
 app = FastAPI()
 
-# -----------------------------
+# ----------------------------------------------------
 # Configuration
-# -----------------------------
+# ----------------------------------------------------
 
-EMAIL = "24f2008447@ds.study.iitm.ac.in"
+TOTAL_ORDERS = 46
+RATE_LIMIT = 15
+WINDOW = 10
 
 ALLOWED_ORIGINS = [
     "https://app-wxigmf.example.com",
     "https://exam.sanand.workers.dev",
 ]
 
-RATE_LIMIT = 14
-WINDOW = 10  # seconds
+# Fixed catalog (IDs 1..46)
+orders_catalog = [
+    {
+        "id": i,
+        "item": f"Item {i}"
+    }
+    for i in range(1, TOTAL_ORDERS + 1)
+]
 
+# Idempotency storage
+idempotency_store = {}
+
+# Rate limit storage
 client_requests = {}
 
-# -----------------------------
-# Middleware 1 - Request Context
-# -----------------------------
+# ----------------------------------------------------
+# CORS
+# ----------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["Retry-After"],
+)
+
+# ----------------------------------------------------
+# Rate Limiter
+# ----------------------------------------------------
 
 @app.middleware("http")
-async def request_context(request: Request, call_next):
+async def rate_limit(request: Request, call_next):
 
-    request_id = request.headers.get("X-Request-ID") or str(uuid4())
-
-    request.state.request_id = request_id
-
-    response = await call_next(request)
-
-    response.headers["X-Request-ID"] = request_id
-
-    return response
-
-
-# -----------------------------
-# Middleware 2 - Rate Limiter
-# -----------------------------
-
-@app.middleware("http")
-async def rate_limiter(request: Request, call_next):
-
-    # Don't rate-limit CORS preflight
     if request.method == "OPTIONS":
         return await call_next(request)
 
@@ -60,46 +67,95 @@ async def rate_limiter(request: Request, call_next):
     timestamps = [t for t in timestamps if now - t < WINDOW]
 
     if len(timestamps) >= RATE_LIMIT:
-        return JSONResponse(
+
+        retry_after = WINDOW - int(now - min(timestamps))
+        if retry_after < 1:
+            retry_after = 1
+
+        response = JSONResponse(
             status_code=429,
-            content={"detail": "Rate limit exceeded"},
+            content={"detail": "Rate limit exceeded"}
         )
 
+        response.headers["Retry-After"] = str(retry_after)
+
+        return response
+
     timestamps.append(now)
+
     client_requests[client_id] = timestamps
 
     return await call_next(request)
 
+# ----------------------------------------------------
+# Idempotent Order Creation
+# ----------------------------------------------------
 
-# -----------------------------
-# Middleware 3 - CORS
-# (ADD LAST so it wraps everything)
-# -----------------------------
+@app.post("/orders", status_code=201)
+async def create_order(
+    request: Request,
+    idempotency_key: str = Header(..., alias="Idempotency-Key")
+):
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://app-wxigmf.example.com",
-        "https://exam.sanand.workers.dev",
-    ],
-    allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
-)
+    if idempotency_key in idempotency_store:
 
-# -----------------------------
-# Endpoint
-# -----------------------------
+        return JSONResponse(
+            status_code=201,
+            content=idempotency_store[idempotency_key]
+        )
 
-@app.get("/ping")
-async def ping(request: Request):
-    return {
-        "email": EMAIL,
-        "request_id": request.state.request_id,
+    order = {
+        "id": str(uuid4()),
+        "status": "created"
     }
 
+    idempotency_store[idempotency_key] = order
+
+    return JSONResponse(
+        status_code=201,
+        content=order
+    )
+
+# ----------------------------------------------------
+# Cursor Pagination
+# ----------------------------------------------------
+
+@app.get("/orders")
+async def list_orders(
+    limit: int = 10,
+    cursor: str | None = None
+):
+
+    start = 0
+
+    if cursor:
+        try:
+            start = int(base64.urlsafe_b64decode(cursor.encode()).decode())
+        except Exception:
+            start = 0
+
+    end = min(start + limit, TOTAL_ORDERS)
+
+    items = orders_catalog[start:end]
+
+    next_cursor = None
+
+    if end < TOTAL_ORDERS:
+        next_cursor = base64.urlsafe_b64encode(
+            str(end).encode()
+        ).decode()
+
+    return {
+        "items": items,
+        "next_cursor": next_cursor
+    }
+
+# ----------------------------------------------------
+# Root
+# ----------------------------------------------------
 
 @app.get("/")
 async def root():
-    return {"message": "FastAPI middleware service is running"}
+    return {
+        "message": "Orders API Running"
+    }
