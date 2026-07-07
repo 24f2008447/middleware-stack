@@ -2,8 +2,8 @@ from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from uuid import uuid4
-import time
 import base64
+import time
 
 app = FastAPI()
 
@@ -15,12 +15,6 @@ TOTAL_ORDERS = 46
 RATE_LIMIT = 15
 WINDOW = 10
 
-ALLOWED_ORIGINS = [
-    "https://app-wxigmf.example.com",
-    "https://exam.sanand.workers.dev",
-]
-
-# Fixed catalog (IDs 1..46)
 orders_catalog = [
     {
         "id": i,
@@ -29,10 +23,7 @@ orders_catalog = [
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
-# Idempotency storage
 idempotency_store = {}
-
-# Rate limit storage
 client_requests = {}
 
 # ----------------------------------------------------
@@ -46,14 +37,9 @@ app.add_middleware(
         "https://app-wxigmf.example.com",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=[
-        "Content-Type",
-        "X-Client-Id",
-        "Idempotency-Key",
-    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["Retry-After"],
-    max_age=600,
 )
 
 # ----------------------------------------------------
@@ -66,23 +52,33 @@ async def rate_limit(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    client_id = request.headers.get("X-Client-Id", "anonymous")
+    # Only rate-limit requests that provide X-Client-Id
+    client_id = request.headers.get("X-Client-Id")
+
+    if client_id is None:
+        return await call_next(request)
 
     now = time.time()
 
     timestamps = client_requests.get(client_id, [])
 
-    timestamps = [t for t in timestamps if now - t < WINDOW]
+    timestamps = [
+        t for t in timestamps
+        if now - t < WINDOW
+    ]
 
     if len(timestamps) >= RATE_LIMIT:
 
-        retry_after = WINDOW - int(now - min(timestamps))
-        if retry_after < 1:
-            retry_after = 1
+        retry_after = max(
+            1,
+            int(WINDOW - (now - timestamps[0]))
+        )
 
         response = JSONResponse(
             status_code=429,
-            content={"detail": "Rate limit exceeded"}
+            content={
+                "detail": "Rate limit exceeded"
+            }
         )
 
         response.headers["Retry-After"] = str(retry_after)
@@ -96,12 +92,11 @@ async def rate_limit(request: Request, call_next):
     return await call_next(request)
 
 # ----------------------------------------------------
-# Idempotent Order Creation
+# POST /orders
 # ----------------------------------------------------
 
 @app.post("/orders", status_code=201)
 async def create_order(
-    request: Request,
     idempotency_key: str = Header(..., alias="Idempotency-Key")
 ):
 
@@ -125,20 +120,24 @@ async def create_order(
     )
 
 # ----------------------------------------------------
-# Cursor Pagination
+# GET /orders
 # ----------------------------------------------------
 
 @app.get("/orders")
-async def list_orders(
+async def get_orders(
     limit: int = 10,
-    cursor: str | None = None
+    cursor: str = None
 ):
 
     start = 0
 
     if cursor:
         try:
-            start = int(base64.urlsafe_b64decode(cursor.encode()).decode())
+            start = int(
+                base64.urlsafe_b64decode(
+                    cursor.encode()
+                ).decode()
+            )
         except Exception:
             start = 0
 
