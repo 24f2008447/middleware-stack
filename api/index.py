@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from uuid import uuid4
 import time
 
@@ -21,81 +20,70 @@ ALLOWED_ORIGINS = [
 RATE_LIMIT = 14
 WINDOW = 10  # seconds
 
-# Stores request timestamps per client
 client_requests = {}
 
 # -----------------------------
 # Middleware 1 - Request Context
 # -----------------------------
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+@app.middleware("http")
+async def request_context(request: Request, call_next):
 
-        request_id = request.headers.get("X-Request-ID")
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
 
-        if not request_id:
-            request_id = str(uuid4())
+    request.state.request_id = request_id
 
-        request.state.request_id = request_id
+    response = await call_next(request)
 
-        response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
 
-        response.headers["X-Request-ID"] = request_id
+    return response
 
-        return response
-
-
-app.add_middleware(RequestContextMiddleware)
 
 # -----------------------------
-# Middleware 2 - CORS
+# Middleware 2 - Rate Limiter
+# -----------------------------
+
+@app.middleware("http")
+async def rate_limiter(request: Request, call_next):
+
+    # Don't rate-limit CORS preflight
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    client_id = request.headers.get("X-Client-Id", "anonymous")
+
+    now = time.time()
+
+    timestamps = client_requests.get(client_id, [])
+
+    timestamps = [t for t in timestamps if now - t < WINDOW]
+
+    if len(timestamps) >= RATE_LIMIT:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded"},
+        )
+
+    timestamps.append(now)
+    client_requests[client_id] = timestamps
+
+    return await call_next(request)
+
+
+# -----------------------------
+# Middleware 3 - CORS
+# (ADD LAST so it wraps everything)
 # -----------------------------
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
-
-# -----------------------------
-# Middleware 3 - Rate Limiter
-# -----------------------------
-
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-
-        # Don't rate-limit CORS preflight requests
-        if request.method == "OPTIONS":
-            return await call_next(request)
-
-        client_id = request.headers.get("X-Client-Id", "anonymous")
-
-        now = time.time()
-
-        if client_id not in client_requests:
-            client_requests[client_id] = []
-
-        # Remove expired timestamps
-        client_requests[client_id] = [
-            t for t in client_requests[client_id]
-            if now - t < WINDOW
-        ]
-
-        if len(client_requests[client_id]) >= RATE_LIMIT:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Rate limit exceeded"},
-            )
-
-        client_requests[client_id].append(now)
-
-        return await call_next(request)
-
-
-app.add_middleware(RateLimitMiddleware)
 
 # -----------------------------
 # Endpoint
@@ -109,7 +97,6 @@ async def ping(request: Request):
     }
 
 
-# Optional root endpoint
 @app.get("/")
 async def root():
     return {"message": "FastAPI middleware service is running"}
