@@ -78,8 +78,11 @@ async def rate_limiter(request: Request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=[
+        "https://app-wxigmf.example.com",
+        "https://exam.sanand.workers.dev",
+    ],
+    allow_credentials=False,
     allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
