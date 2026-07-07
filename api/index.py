@@ -1,140 +1,140 @@
-from fastapi import FastAPI, Request, Header
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from uuid import uuid4
 import time
-import base64
 
 app = FastAPI()
 
-TOTAL_ORDERS = 46
-RATE_LIMIT = 15
-WINDOW = 10
+# ----------------------------
+# Configuration
+# ----------------------------
 
-ALLOWED_ORIGINS = {
-    "https://exam.sanand.workers.dev",
+EMAIL = "24f2008447@ds.study.iitm.ac.in"
+
+ALLOWED_ORIGINS = [
     "https://app-wxigmf.example.com",
-}
-
-orders = [
-    {"id": i, "item": f"Item {i}"}
-    for i in range(1, TOTAL_ORDERS + 1)
+    "https://exam.sanand.workers.dev",
 ]
 
-idempotency_store = {}
+RATE_LIMIT = 14
+WINDOW = 10
+
 client_requests = {}
 
-# ---------- Rate Limiter ----------
+# ----------------------------
+# Middleware 1
+# Request Context
+# ----------------------------
 
-@app.middleware("http")
-async def rate_limit(request: Request, call_next):
+class RequestContextMiddleware(BaseHTTPMiddleware):
 
-    if request.method == "OPTIONS":
-        return await call_next(request)
+    async def dispatch(self, request: Request, call_next):
 
-    client_id = request.headers.get("X-Client-Id", "anonymous")
+        request_id = request.headers.get("X-Request-ID")
 
-    now = time.time()
+        if request_id is None:
+            request_id = str(uuid4())
 
-    bucket = client_requests.get(client_id, [])
+        request.state.request_id = request_id
 
-    bucket = [t for t in bucket if now - t < WINDOW]
+        response = await call_next(request)
 
-    if len(bucket) >= RATE_LIMIT:
-
-        retry_after = max(
-            1,
-            int(WINDOW - (now - bucket[0]))
-        )
-
-        response = JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded"},
-        )
-
-        response.headers["Retry-After"] = str(retry_after)
-
-        origin = request.headers.get("Origin")
-
-        if origin in ALLOWED_ORIGINS:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Vary"] = "Origin"
-            response.headers["Access-Control-Expose-Headers"] = "Retry-After"
+        response.headers["X-Request-ID"] = request_id
 
         return response
 
-    bucket.append(now)
 
-    client_requests[client_id] = bucket
+app.add_middleware(RequestContextMiddleware)
 
-    return await call_next(request)
-
-
-# ---------- CORS ----------
+# ----------------------------
+# Middleware 2
+# CORS
+# ----------------------------
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(ALLOWED_ORIGINS),
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Retry-After"],
+    expose_headers=["X-Request-ID"],
 )
 
-# ---------- POST ----------
+# ----------------------------
+# Middleware 3
+# Rate Limiter
+# ----------------------------
 
-@app.post("/orders", status_code=201)
-async def create_order(
-    idempotency_key: str = Header(..., alias="Idempotency-Key")
-):
+class RateLimitMiddleware(BaseHTTPMiddleware):
 
-    if idempotency_key in idempotency_store:
-        return idempotency_store[idempotency_key]
+    async def dispatch(self, request: Request, call_next):
 
-    order = {
-        "id": str(uuid4()),
-        "status": "created",
-    }
+        # Don't rate limit preflight requests
+        if request.method == "OPTIONS":
+            return await call_next(request)
 
-    idempotency_store[idempotency_key] = order
+        client_id = request.headers.get("X-Client-Id", "anonymous")
 
-    return order
+        now = time.time()
 
+        timestamps = client_requests.get(client_id, [])
 
-# ---------- GET ----------
+        timestamps = [
+            t for t in timestamps
+            if now - t < WINDOW
+        ]
 
-@app.get("/orders")
-async def list_orders(
-    limit: int = 10,
-    cursor: str | None = None,
-):
+        if len(timestamps) >= RATE_LIMIT:
 
-    start = 0
-
-    if cursor:
-        try:
-            start = int(
-                base64.urlsafe_b64decode(
-                    cursor.encode()
-                ).decode()
+            retry_after = max(
+                1,
+                int(WINDOW - (now - timestamps[0]))
             )
-        except Exception:
-            start = 0
 
-    end = min(start + limit, TOTAL_ORDERS)
+            response = JSONResponse(
+                status_code=429,
+                content={
+                    "detail": "Rate limit exceeded"
+                },
+            )
 
-    next_cursor = None
+            response.headers["Retry-After"] = str(retry_after)
 
-    if end < TOTAL_ORDERS:
-        next_cursor = base64.urlsafe_b64encode(
-            str(end).encode()
-        ).decode()
+            origin = request.headers.get("Origin")
+
+            if origin in ALLOWED_ORIGINS:
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Expose-Headers"] = "X-Request-ID"
+                response.headers["Vary"] = "Origin"
+
+            return response
+
+        timestamps.append(now)
+
+        client_requests[client_id] = timestamps
+
+        return await call_next(request)
+
+
+app.add_middleware(RateLimitMiddleware)
+
+# ----------------------------
+# Endpoint
+# ----------------------------
+
+@app.get("/ping")
+async def ping(request: Request):
 
     return {
-        "items": orders[start:end],
-        "next_cursor": next_cursor,
+        "email": EMAIL,
+        "request_id": request.state.request_id,
     }
 
 
 @app.get("/")
 async def root():
-    return {"status": "running"}
+    return {
+        "message": "Middleware Stack API Running"
+    }
