@@ -41,11 +41,19 @@ client_requests = {}
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=[
+        "https://exam.sanand.workers.dev",
+        "https://app-wxigmf.example.com",
+    ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=[
+        "Content-Type",
+        "X-Client-Id",
+        "Idempotency-Key",
+    ],
     expose_headers=["Retry-After"],
+    max_age=600,
 )
 
 # ----------------------------------------------------
