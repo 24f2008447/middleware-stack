@@ -1,116 +1,100 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from typing import List
-import yaml
-import os
-from dotenv import load_dotenv
+
 
 app = FastAPI()
 
-# Allow exam page
+
+EMAIL = "24f2008447@ds.study.iitm.ac.in"
+
+API_KEY = "ak_hzn229get61gaphu6i16fcus"
+
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://exam.sanand.workers.dev"],
-    allow_methods=["*"],
+    allow_origins=["*"],
+    allow_methods=["POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-load_dotenv()
 
-# -----------------------------
-# Defaults
-# -----------------------------
-
-config = {
-    "port": 8000,
-    "workers": 1,
-    "debug": False,
-    "log_level": "info",
-    "api_key": "default-secret-000",
-}
-
-# -----------------------------
-# YAML
-# -----------------------------
-
-with open("config.development.yaml") as f:
-    yaml_cfg = yaml.safe_load(f)
-
-config.update(yaml_cfg)
-
-# -----------------------------
-# .env
-# -----------------------------
-
-if os.getenv("APP_PORT"):
-    config["port"] = int(os.getenv("APP_PORT"))
-
-if os.getenv("NUM_WORKERS"):
-    config["workers"] = int(os.getenv("NUM_WORKERS"))
-
-if os.getenv("APP_LOG_LEVEL"):
-    config["log_level"] = os.getenv("APP_LOG_LEVEL")
-
-if os.getenv("APP_API_KEY"):
-    config["api_key"] = os.getenv("APP_API_KEY")
-
-# -----------------------------
-# OS ENV
-# -----------------------------
-
-if os.getenv("APP_DEBUG"):
-    config["debug"] = os.getenv("APP_DEBUG").lower() in (
-        "true",
-        "1",
-        "yes",
-        "on",
-    )
+class Event(BaseModel):
+    user: str
+    amount: float
+    ts: int
 
 
-def parse_bool(v):
-    return str(v).lower() in (
-        "true",
-        "1",
-        "yes",
-        "on",
-    )
+class AnalyticsRequest(BaseModel):
+    events: List[Event]
 
 
-# -----------------------------
-# Endpoint
-# -----------------------------
-
-@app.get("/effective-config")
-def effective_config(
-    set: List[str] = Query(default=[])
+@app.post("/analytics")
+async def analytics(
+    request: AnalyticsRequest,
+    x_api_key: str | None = Header(default=None)
 ):
 
-    result = config.copy()
+    # Authentication
+    if x_api_key != API_KEY:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "detail": "Unauthorized"
+            }
+        )
 
-    for item in set:
 
-        if "=" not in item:
-            continue
+    events = request.events
 
-        key, value = item.split("=", 1)
 
-        if key == "port":
-            result[key] = int(value)
+    total_events = len(events)
 
-        elif key == "workers":
-            result[key] = int(value)
 
-        elif key == "debug":
-            result[key] = parse_bool(value)
+    users = set()
 
-        else:
-            result[key] = value
+    revenue = 0.0
 
-    result["api_key"] = "****"
+    user_revenue = {}
 
-    return result
+
+    for event in events:
+
+        users.add(event.user)
+
+        if event.amount > 0:
+
+            revenue += event.amount
+
+            if event.user not in user_revenue:
+                user_revenue[event.user] = 0
+
+            user_revenue[event.user] += event.amount
+
+
+    top_user = None
+
+    if user_revenue:
+        top_user = max(
+            user_revenue,
+            key=user_revenue.get
+        )
+
+
+    return {
+        "email": EMAIL,
+        "total_events": total_events,
+        "unique_users": len(users),
+        "revenue": revenue,
+        "top_user": top_user
+    }
 
 
 @app.get("/")
 def root():
-    return {"status": "running"}
+    return {
+        "message": "Analytics API running"
+    }
