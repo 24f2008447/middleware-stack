@@ -1,74 +1,82 @@
-from fastapi import FastAPI, Request, Query
-from fastapi.middleware.cors import CORSMiddleware
-from uuid import uuid4
-import time
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import jwt
 
 app = FastAPI()
 
-EMAIL = "24f2008447@ds.study.iitm.ac.in"
+PUBLIC_KEY = """
+-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY
+cxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID
+EkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc
+WyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW
+ed+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI
+SI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX
+dQIDAQAB
+-----END PUBLIC KEY-----
+"""
 
-ALLOWED_ORIGINS = [
-    "https://dash-26kvxf.example.com"
-]
+ISSUER = "https://idp.exam.local"
+AUDIENCE = "tds-jcwvpw70.apps.exam.local"
 
-# -----------------------------
-# CORS
-# -----------------------------
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"],
-)
+class TokenRequest(BaseModel):
+    token: str
 
-# -----------------------------
-# Request ID + Process Time
-# -----------------------------
 
-@app.middleware("http")
-async def add_headers(request: Request, call_next):
+@app.post("/verify")
+def verify(req: TokenRequest):
 
-    request_id = str(uuid4())
+    try:
+        payload = jwt.decode(
+            req.token,
+            PUBLIC_KEY,
+            algorithms=["RS256"],
+            issuer=ISSUER,
+            audience=AUDIENCE,
+        )
 
-    start = time.perf_counter()
+        return {
+            "valid": True,
+            "email": payload.get("email"),
+            "sub": payload.get("sub"),
+            "aud": payload.get("aud"),
+        }
 
-    response = await call_next(request)
+    except jwt.ExpiredSignatureError:
+        return JSONResponse(
+            status_code=401,
+            content={"valid": False}
+        )
 
-    process_time = time.perf_counter() - start
+    except jwt.InvalidAudienceError:
+        return JSONResponse(
+            status_code=401,
+            content={"valid": False}
+        )
 
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-Process-Time"] = f"{process_time:.6f}"
+    except jwt.InvalidIssuerError:
+        return JSONResponse(
+            status_code=401,
+            content={"valid": False}
+        )
 
-    return response
+    except jwt.InvalidTokenError:
+        return JSONResponse(
+            status_code=401,
+            content={"valid": False}
+        )
 
-# -----------------------------
-# Stats Endpoint
-# -----------------------------
+    except Exception:
+        return JSONResponse(
+            status_code=401,
+            content={"valid": False}
+        )
 
-@app.get("/stats")
-async def stats(values: str = Query(...)):
-
-    nums = [int(v.strip()) for v in values.split(",")]
-
-    total = sum(nums)
-    count = len(nums)
-
-    return {
-        "email": EMAIL,
-        "count": count,
-        "sum": total,
-        "min": min(nums),
-        "max": max(nums),
-        "mean": total / count
-    }
-
-# -----------------------------
-# Root
-# -----------------------------
 
 @app.get("/")
-async def root():
+def root():
     return {
-        "message": "Metrics API Running"
+        "message": "OAuth verifier running"
     }
